@@ -81,12 +81,15 @@ def list_overrides(
                 "prepare_source",
                 "build_sdist",
                 "build_wheel",
-                "get_build_requirements",
-                "get_build_sdist_requirements",
-                "get_build_wheel_requirements",
+                "get_build_system_dependencies",
+                "get_build_backend_dependencies",
+                "get_build_sdist_dependencies",
+                "get_install_dependencies_of_sdist",
                 "expected_source_archive_name",
                 "expected_source_directory_name",
                 "add_extra_metadata_to_wheels",
+                # from packagesettings/_hooks.py
+                "update_extra_environ",
             ]:
                 if hasattr(pbi.plugin, hook):
                     plugin_hooks.append(hook)
