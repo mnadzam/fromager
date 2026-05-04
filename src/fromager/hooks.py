@@ -16,6 +16,13 @@ if typing.TYPE_CHECKING:
 
 _mgrs: dict[str, hook.HookManager] = {}
 
+# Event callbacks that run for every package (e.g., after build, after bootstrap).
+GLOBAL_HOOK_NAMES: tuple[str, ...] = (
+    "post_bootstrap",
+    "post_build",
+    "prebuilt_wheel",
+)
+
 logger = logging.getLogger(__name__)
 
 
