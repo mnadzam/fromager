@@ -8,6 +8,7 @@ import sys
 import click
 
 from . import (
+    candidate,
     clickext,
     commands,
     context,
@@ -258,7 +259,7 @@ def main(
         max_jobs=jobs,
         settings_dir=settings_dir,
         cooldown=(
-            context.Cooldown(min_age=datetime.timedelta(days=min_release_age))
+            candidate.Cooldown(min_age=datetime.timedelta(days=min_release_age))
             if min_release_age > 0
             else None
         ),

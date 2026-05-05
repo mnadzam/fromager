@@ -15,6 +15,20 @@ from .request_session import session
 logger = logging.getLogger(__name__)
 
 
+@dataclasses.dataclass
+class Cooldown:
+    """Policy for rejecting recently-published package versions.
+
+    bootstrap_time is fixed at construction so all resolutions in a single run
+    share the same cutoff.
+    """
+
+    min_age: datetime.timedelta
+    bootstrap_time: datetime.datetime = dataclasses.field(
+        default_factory=lambda: datetime.datetime.now(datetime.UTC)
+    )
+
+
 @dataclasses.dataclass(frozen=True, order=True, slots=True, repr=False, kw_only=True)
 class Candidate:
     name: str

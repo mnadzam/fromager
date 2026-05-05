@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import collections
-import dataclasses
 import datetime
 import logging
 import os
@@ -24,27 +23,13 @@ from . import (
 )
 
 if typing.TYPE_CHECKING:
-    from . import build_environment
+    from . import build_environment, candidate
 
 logger = logging.getLogger(__name__)
 
 # Map package names to (requirement type, dependency name, version)
 BuildRequirements = dict[str, list[tuple[str, NormalizedName, Version, Requirement]]]
 ROOT_BUILD_REQUIREMENT = canonicalize_name("", validate=False)
-
-
-@dataclasses.dataclass
-class Cooldown:
-    """Policy for rejecting recently-published package versions.
-
-    bootstrap_time is fixed at construction so all resolutions in a single run
-    share the same cutoff.
-    """
-
-    min_age: datetime.timedelta
-    bootstrap_time: datetime.datetime = dataclasses.field(
-        default_factory=lambda: datetime.datetime.now(datetime.UTC)
-    )
 
 
 class WorkContext:
@@ -62,7 +47,7 @@ class WorkContext:
         max_jobs: int | None = None,
         settings_dir: pathlib.Path | None = None,
         wheel_server_url: str = "",
-        cooldown: Cooldown | None = None,
+        cooldown: candidate.Cooldown | None = None,
         max_release_age: datetime.timedelta | None = None,
     ):
         if active_settings is None:
@@ -113,7 +98,7 @@ class WorkContext:
 
         self._parallel_builds = False
 
-        self.cooldown: Cooldown | None = cooldown
+        self.cooldown: candidate.Cooldown | None = cooldown
         self._max_release_age: datetime.timedelta | None = max_release_age
 
     @property

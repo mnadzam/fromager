@@ -19,8 +19,7 @@ import yaml
 from packaging.requirements import Requirement
 from packaging.version import Version
 
-from fromager import context, packagesettings, resolver, sources, wheels
-from fromager.context import Cooldown
+from fromager import candidate, context, packagesettings, resolver, sources, wheels
 
 _BOOTSTRAP_TIME = datetime.datetime(2026, 3, 26, 0, 0, 0, tzinfo=datetime.UTC)
 _COOLDOWN_7_DAYS = datetime.timedelta(days=7)
@@ -77,7 +76,7 @@ _all_recent_json_response = {
     ],
 }
 
-_COOLDOWN = Cooldown(
+_COOLDOWN = candidate.Cooldown(
     min_age=_COOLDOWN_7_DAYS,
     bootstrap_time=_BOOTSTRAP_TIME,
 )
@@ -327,7 +326,7 @@ def test_non_pypi_index_allows_without_upload_time(
 def _make_ctx(
     tmp_path: pathlib.Path,
     *,
-    cooldown: Cooldown | None,
+    cooldown: candidate.Cooldown | None,
     min_release_age: int | None = None,
 ) -> context.WorkContext:
     """Build a WorkContext with an optional per-package min_release_age setting."""
@@ -457,7 +456,7 @@ def test_per_package_cooldown_disable_via_ctx(tmp_path: pathlib.Path) -> None:
 # ---------------------------------------------------------------------------
 
 _GITLAB_BOOTSTRAP_TIME = datetime.datetime(2025, 5, 20, 0, 0, 0, tzinfo=datetime.UTC)
-_GITLAB_COOLDOWN = Cooldown(
+_GITLAB_COOLDOWN = candidate.Cooldown(
     min_age=datetime.timedelta(days=7),
     bootstrap_time=_GITLAB_BOOTSTRAP_TIME,
 )
@@ -507,7 +506,9 @@ _gitlab_tags_response = """
 """
 
 
-def _make_gitlab_provider(cooldown: Cooldown | None) -> resolver.GitLabTagProvider:
+def _make_gitlab_provider(
+    cooldown: candidate.Cooldown | None,
+) -> resolver.GitLabTagProvider:
     return resolver.GitLabTagProvider(
         project_path="test/pkg",
         server_url="https://gitlab.com",
@@ -832,7 +833,7 @@ def test_compute_max_age_cutoff_with_cooldown(
     tmp_context: context.WorkContext,
 ) -> None:
     """_compute_max_age_cutoff uses cooldown's bootstrap_time when available."""
-    tmp_context.cooldown = Cooldown(
+    tmp_context.cooldown = candidate.Cooldown(
         min_age=datetime.timedelta(days=7),
         bootstrap_time=_BOOTSTRAP_TIME,
     )

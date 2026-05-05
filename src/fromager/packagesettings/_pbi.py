@@ -257,7 +257,7 @@ class PackageBuildInfo:
 
         Returns None (inherit global), 0 (disabled), or a positive integer
         (override days). The caller is responsible for converting to a
-        :class:`~fromager.context.Cooldown` instance.
+        :class:`~fromager.candidate.Cooldown` instance.
         """
         return self._ps.resolver_dist.min_release_age
 

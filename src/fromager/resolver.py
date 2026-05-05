@@ -31,9 +31,8 @@ from requests.models import Response
 from resolvelib.resolvers import RequirementInformation
 
 from . import overrides
-from .candidate import Candidate
+from .candidate import Candidate, Cooldown
 from .constraints import Constraints
-from .context import Cooldown
 from .extras_provider import ExtrasProvider
 from .http_retry import RETRYABLE_EXCEPTIONS, retry_on_exception
 from .request_session import session
