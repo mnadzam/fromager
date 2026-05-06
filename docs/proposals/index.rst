@@ -3,8 +3,6 @@ Fromager Enhancement Proposals
 
 .. toctree::
    :maxdepth: 1
+   :glob:
 
-   iterative-bootstrap
-   new-patcher-config
-   new-resolver-config
-   release-cooldown
+   *
