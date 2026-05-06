@@ -37,7 +37,7 @@ dependencies = [
     "packaging",
     "packageurl-python",
     "psutil",
-    "pydantic",
+    "pydantic>=2.12",
     "pypi_simple",
     "pyproject_hooks>=1.0.0,!=1.1.0",
     "PyYAML",
