@@ -103,7 +103,7 @@ def resolve(
         req_type=req_type,
         ignore_platform=ignore_platform,
     )
-    provider.cooldown = resolve_package_cooldown(ctx, req)
+    provider.cooldown = resolve_package_cooldown(ctx, req, req_type=req_type)
     max_age_cutoff = _compute_max_age_cutoff(ctx)
     results = find_all_matching_from_provider(
         provider, req, max_age_cutoff=max_age_cutoff
@@ -137,19 +137,36 @@ def default_resolver_provider(
     )
 
 
+def _has_equality_pin(req: Requirement) -> bool:
+    """Return True if the requirement has a single exact ``==`` pin.
+
+    Rejects wildcard pins (``==1.*``) and compound specifiers (``==1,>2``)
+    which are not true exact version pins.
+    """
+    specs = list(req.specifier)
+    return len(specs) == 1 and specs[0].operator == "==" and "*" not in specs[0].version
+
+
 def resolve_package_cooldown(
     ctx: context.WorkContext,
     req: Requirement,
+    req_type: RequirementType | None = None,
 ) -> Cooldown | None:
     """Compute the effective cooldown for a single package.
 
     Args:
         ctx: The current work context (provides the global cooldown).
         req: The package requirement being resolved.
+        req_type: The requirement type (top-level, install, etc.).
 
     Returns:
         The cooldown to pass to the provider, or ``None`` if disabled.
     """
+    if req_type == RequirementType.TOP_LEVEL and _has_equality_pin(req):
+        if ctx.cooldown is not None:
+            logger.info("cooldown bypassed as the top-level requirement uses == pin")
+        return None
+
     per_package_days = ctx.package_build_info(req).resolver_min_release_age
     global_cooldown = ctx.cooldown
     if per_package_days is None:

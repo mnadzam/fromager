@@ -55,17 +55,13 @@ References:
   global default plus per-package overrides.
 - **SSH transport** for git timestamp retrieval.
 
-### Future consideration: `==` pin exemptions
+### `==` pin exemptions (implemented)
 
-Whether `==` pins in top-level requirements or constraints files
-should automatically bypass cooldown is deferred. The per-package
-`resolver_dist.min_release_age: 0` override already provides an
-explicit, auditable escape hatch for packages that need to use
-recently-published versions. Adding automatic `==` exemptions
-would introduce a special case that weakens the security model
-and requires users to understand the distinction. This can be
-revisited if the per-package override proves too cumbersome in
-practice.
+Top-level single exact `==` pins (e.g. `torch==2.5.1`) bypass cooldown
+automatically. Wildcard (`==1.*`) and compound specifiers are not exempt.
+Transitive `==` pins remain subject to cooldown for security. See
+[the how-to guide](../how-tos/release-age-cooldown.rst) for details.
+Tracked in [#1123](https://github.com/python-wheel-build/fromager/issues/1123).
 
 ## How
 
