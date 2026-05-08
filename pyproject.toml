@@ -34,7 +34,7 @@ dependencies = [
     "click>=8.1.7",
     "elfdeps>=0.2.0",
     "license-expression",
-    "packaging",
+    "packaging>=26.1",
     "packageurl-python",
     "psutil",
     "pydantic>=2.12",
