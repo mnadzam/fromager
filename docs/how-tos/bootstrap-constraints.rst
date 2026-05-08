@@ -35,3 +35,21 @@ production packages.
 
 This will use the constraints in the ``constraints.txt`` file to build the
 production packages for ``my-package``.
+
+Multiple constraints and remote constraints
+-------------------------------------------
+
+.. versionchanged:: 0.84.0
+   The ``--constraints-file`` / ``-c`` option now supports an arbitrary
+   number of arguments.
+
+The ``--constraints-file`` argument can be supplied multiple times. Multiple
+occurrences of the same package are merged and validated. For example
+``egg>=1.0`` and ``egg!=1.1.2`` are combined into ``egg>=1.0,!=1.1.2``. An
+unsatisfiable combination like ``egg<1.0`` and ``egg>2.0`` is an error.
+
+Fromager can load constraints from `https://` URLs, too.
+
+.. code-block:: console
+
+   $ fromager -c constraints.txt -c local-constraints.txt -c https://company.example/security-constraints.txt bootstrap my-package

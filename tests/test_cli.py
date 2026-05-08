@@ -1,5 +1,6 @@
 import pathlib
 
+import requests_mock
 from click.testing import CliRunner
 
 from fromager.__main__ import main as fromager
@@ -94,6 +95,40 @@ def test_output_dir_overridden_by_explicit_flags(
     assert (out / "wheels-repo").is_dir()
     assert (out / "work-dir").is_dir()
     assert not (out / "sdists-repo").exists()
+
+
+def test_multiple_constraints_files(
+    tmp_path: pathlib.Path, cli_runner: CliRunner
+) -> None:
+    constraints1 = tmp_path / "constraints1.txt"
+    constraints1.write_text("foo==1.0\nbar!=2.1.1\n")
+    constraints2 = tmp_path / "constraints2.txt"
+    constraints2.write_text("bar>=2.0\n")
+
+    url = "https://fromager.test/remote-constraints.txt"
+
+    with requests_mock.Mocker() as r:
+        r.get(
+            url,
+            text="remote>=1.0\n",
+        )
+        result = cli_runner.invoke(
+            fromager,
+            [
+                "--verbose",
+                "-c",
+                str(constraints1),
+                "--constraints-file",
+                str(constraints2),
+                "--constraints-file",
+                url,
+                "lint",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    assert "foo==1.0" in result.output
+    assert "bar!=2.1.1,>=2.0" in result.output
+    assert "remote>=1.0" in result.output
 
 
 KNOWN_COMMANDS: set[str] = {

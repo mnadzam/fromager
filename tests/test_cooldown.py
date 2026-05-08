@@ -223,7 +223,6 @@ def test_cooldown_applied_automatically_via_ctx(tmp_path: pathlib.Path) -> None:
     """
     ctx = context.WorkContext(
         active_settings=None,
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -259,7 +258,6 @@ def test_toplevel_equality_pin_bypasses_cooldown_via_resolve(
     """
     ctx = context.WorkContext(
         active_settings=None,
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -294,7 +292,6 @@ def test_cooldown_applied_via_get_source_provider(tmp_path: pathlib.Path) -> Non
     """
     ctx = context.WorkContext(
         active_settings=None,
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -323,7 +320,6 @@ def test_non_pypi_index_allows_without_upload_time(
     """
     ctx = context.WorkContext(
         active_settings=None,
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -382,7 +378,6 @@ def _make_ctx(
             variant="cpu",
             max_jobs=None,
         ),
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -451,7 +446,6 @@ def test_per_package_cooldown_disable_via_ctx(tmp_path: pathlib.Path) -> None:
             variant="cpu",
             max_jobs=None,
         ),
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -674,7 +668,6 @@ def test_local_wheel_server_allows_without_upload_time(
     local_server_url = "http://127.0.0.1:9999/simple/"
     ctx = context.WorkContext(
         active_settings=None,
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",

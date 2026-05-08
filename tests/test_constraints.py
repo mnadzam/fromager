@@ -1,7 +1,9 @@
+import io
 import pathlib
 from unittest import mock
 
 import pytest
+import requests_mock
 from packaging import markers
 from packaging.requirements import Requirement
 from packaging.version import Version
@@ -11,7 +13,10 @@ from fromager.constraints import Constraints, InvalidConstraintError
 
 def test_constraint_is_satisfied_by() -> None:
     c = Constraints()
+    assert not c
     c.add_constraint("foo<=1.1")
+    assert c
+    assert len(c) == 1
     assert c.is_satisfied_by("foo", Version("1.1"))
     assert c.is_satisfied_by("foo", Version("1.0"))
     assert c.is_satisfied_by("bar", Version("2.0"))
@@ -91,6 +96,22 @@ def test_add_constraint_conflict() -> None:
     assert len(c) == 4  # flit_core, foo, bar, and baz
 
 
+def test_dump_constraints() -> None:
+    c = Constraints()
+
+    out = io.StringIO()
+    c.dump_constraints(out)
+    assert out.getvalue() == ""
+
+    c.add_constraint("foo>=1.0")
+    c.add_constraint("foo<2.0")
+    c.add_constraint("bar==1.1")
+
+    out = io.StringIO()
+    c.dump_constraints(out)
+    assert out.getvalue() == "bar==1.1\nfoo<2.0,>=1.0\n"
+
+
 def test_allow_prerelease() -> None:
     c = Constraints()
     c.add_constraint("foo>=1.1")
@@ -115,6 +136,18 @@ def test_load_constraints_file(tmp_path: pathlib.Path) -> None:
     c.load_constraints_file(constraint_file)
     assert list(c) == ["egg", "torch"]  # type: ignore
     assert c.get_constraint("torch") == Requirement("torch==3.1.0")
+
+
+def test_load_constraints_url() -> None:
+    c = Constraints()
+    url = "https://fromager.test/remote-constraints.txt"
+    with requests_mock.Mocker() as r:
+        r.get(
+            url,
+            text="remote>=1.0\n",
+        )
+        c.load_constraints_file(url)
+    assert c.get_constraint("remote") == Requirement("remote>=1.0")
 
 
 def test_invalid_constraints() -> None:
