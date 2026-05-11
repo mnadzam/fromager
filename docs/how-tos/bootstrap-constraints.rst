@@ -53,3 +53,18 @@ Fromager can load constraints from `https://` URLs, too.
 .. code-block:: console
 
    $ fromager -c constraints.txt -c local-constraints.txt -c https://company.example/security-constraints.txt bootstrap my-package
+
+Blocking packages
+-----------------
+
+To block a package entirely so that no version is accepted, use the special
+constraint ``<0`` (or equivalently ``<0.0`` or ``<0.0.0``). No valid Python
+version can satisfy this specifier, so the package is effectively excluded from
+the build.
+
+.. code-block:: text
+
+   unwanted-package<0
+
+A blocked constraint cannot be combined with a regular constraint for the same
+package. Adding both will raise an error.

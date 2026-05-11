@@ -4,12 +4,27 @@ import typing
 from collections.abc import Generator
 
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.utils import NormalizedName, canonicalize_name
 from packaging.version import Version
 
 from . import requirements_file
 
 logger = logging.getLogger(__name__)
+
+
+def _is_blocked_specifier(specifier: SpecifierSet) -> bool:
+    """Return True if specifier blocks a package entirely.
+
+    The convention ``<0``, ``<0.0``, or ``<0.0.0`` is used to mark a
+    package as blocked so that no version can satisfy the constraint.
+    """
+    specs = list(specifier)
+    return (
+        len(specs) == 1
+        and specs[0].operator == "<"
+        and Version(specs[0].version) == Version("0")
+    )
 
 
 class InvalidConstraintError(ValueError):
@@ -51,8 +66,12 @@ class Constraints:
         if not req.specifier:
             raise InvalidConstraintError(f"Constraint {unparsed!r} has no specifiers")
 
+        # A "blocked" specifier (<0, <0.0, <0.0.0) is intentionally
+        # unsatisfiable and used to exclude a package from builds.
+        blocked = _is_blocked_specifier(req.specifier)
+
         # verify that incoming constraint is okay by itself
-        if req.specifier.is_unsatisfiable():
+        if not blocked and req.specifier.is_unsatisfiable():
             raise InvalidConstraintError(f"Constraint {unparsed!r} is unsatisfiable")
 
         if not requirements_file.evaluate_marker(req, req):
@@ -60,14 +79,21 @@ class Constraints:
             return
 
         if previous is not None:
-            logger.debug("combining constraints %s and %s", previous, req)
-            new_specifier = req.specifier & previous.specifier
-            if new_specifier.is_unsatisfiable():
+            prev_blocked = _is_blocked_specifier(previous.specifier)
+            if blocked != prev_blocked:
                 raise InvalidConstraintError(
-                    f"Combined specifier '{new_specifier}' is not satisfiable "
+                    f"Cannot combine blocked and non-blocked constraints "
                     f"(existing: {previous}, new: {req})"
                 )
-            req.specifier = new_specifier
+            if not blocked:
+                logger.debug("combining constraints %s and %s", previous, req)
+                new_specifier = req.specifier & previous.specifier
+                if new_specifier.is_unsatisfiable():
+                    raise InvalidConstraintError(
+                        f"Combined specifier '{new_specifier}' is not satisfiable "
+                        f"(existing: {previous}, new: {req})"
+                    )
+                req.specifier = new_specifier
         else:
             logger.debug(f"adding constraint {req}")
 
@@ -95,6 +121,13 @@ class Constraints:
         constraint = self.get_constraint(pkg_name)
         if constraint:
             return bool(constraint.specifier.prereleases)
+        return False
+
+    def is_blocked(self, pkg_name: str) -> bool:
+        """Return True if the package is blocked by a ``<0`` constraint."""
+        constraint = self.get_constraint(pkg_name)
+        if constraint:
+            return _is_blocked_specifier(constraint.specifier)
         return False
 
     def is_satisfied_by(self, pkg_name: str, version: Version) -> bool:
