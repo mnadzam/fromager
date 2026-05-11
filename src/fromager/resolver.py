@@ -680,9 +680,6 @@ class BaseProvider(ExtrasProvider):
                 )
             return False
 
-        if self.is_blocked_by_cooldown(candidate):
-            return False
-
         return True
 
     def is_blocked_by_cooldown(self, candidate: Candidate) -> bool:
@@ -700,10 +697,9 @@ class BaseProvider(ExtrasProvider):
                 if candidate.name not in BaseProvider._cooldown_unsupported_warned:
                     BaseProvider._cooldown_unsupported_warned.add(candidate.name)
                     logger.warning(
-                        "%s: release-age cooldown cannot be enforced — upload "
+                        "release-age cooldown cannot be enforced — upload "
                         "timestamp support is not yet implemented for %s; "
                         "cooldown check skipped",
-                        candidate.name,
                         self.get_provider_description(),
                     )
                 return False
@@ -712,8 +708,7 @@ class BaseProvider(ExtrasProvider):
             # Fail closed: we cannot verify the age of this candidate, so reject it.
             if DEBUG_RESOLVER:
                 logger.debug(
-                    "%s: skipping %s — upload_time unknown, required for cooldown",
-                    candidate.name,
+                    "skipping %s — upload_time unknown, required for cooldown",
                     candidate.version,
                 )
             return True
@@ -727,8 +722,7 @@ class BaseProvider(ExtrasProvider):
             if DEBUG_RESOLVER:
                 age = self.cooldown.bootstrap_time - candidate.upload_time
                 logger.debug(
-                    "%s: skipping %s uploaded %s ago (cooldown: %s)",
-                    candidate.name,
+                    "skipping %s uploaded %s ago (cooldown: %s)",
                     candidate.version,
                     age,
                     self.cooldown.min_age,
@@ -809,6 +803,17 @@ class BaseProvider(ExtrasProvider):
                 identifier, requirements, incompatibilities, candidate
             )
         ]
+        # Apply cooldown filtering after specifier/constraint validation
+        blocked = [c for c in candidates if self.is_blocked_by_cooldown(c)]
+        if blocked:
+            for b in blocked:
+                candidates.remove(b)
+            versions = ", ".join(str(b.version) for b in blocked)
+            logger.info(
+                "cooldown blocked %d version(s): %s",
+                len(blocked),
+                versions,
+            )
         if not candidates:
             raise resolvelib.resolvers.ResolverException(
                 self._get_no_match_error_message(identifier, requirements)

@@ -10,7 +10,6 @@ import logging
 import pathlib
 import re
 import typing
-from collections import defaultdict
 
 import pytest
 import requests_mock
@@ -117,10 +116,8 @@ def test_cooldown_filters_recent_version(
         candidate = result.mapping["test-pkg"]
         # 2.0.0 is 2 days old (within cooldown); 1.3.2 is 11 days old (outside).
         assert str(candidate.version) == "1.3.2"
-        # 2.0.0 should be logged as skipped; 1.3.2 should not.
-        assert "skipping 2.0.0" in caplog.text
-        assert "cooldown" in caplog.text
-        assert "skipping 1.3.2" not in caplog.text
+        # 2.0.0 should be logged as blocked; 1.3.2 should not appear in the summary.
+        assert "cooldown blocked 1 version(s): 2.0.0" in caplog.text
 
 
 def test_cooldown_disabled_selects_latest() -> None:
@@ -171,17 +168,11 @@ def test_cooldown_rejects_candidate_without_upload_time(
         upload_time=None,
     )
     provider = resolver.PyPIProvider(cooldown=_COOLDOWN)
-    req = Requirement("test-pkg")
-    requirements: typing.Any = defaultdict(list)
-    requirements["test-pkg"].append(req)
-    incompatibilities: typing.Any = defaultdict(list)
 
     with caplog.at_level(logging.DEBUG, logger="fromager.resolver"):
-        result = provider.validate_candidate(
-            "test-pkg", requirements, incompatibilities, candidate
-        )
+        result = provider.is_blocked_by_cooldown(candidate)
 
-    assert result is False
+    assert result is True
     assert "upload_time unknown" in caplog.text
     assert "1.0.0" in caplog.text
 
@@ -567,8 +558,7 @@ def test_gitlab_cooldown_filters_recent_tag(
         candidate = result.mapping["test-pkg"]
         # v0.0.3 (2025-05-14) is inside the 7-day window; v0.0.2 is the next newest.
         assert str(candidate.version) == "0.0.2"
-        assert "skipping 0.0.3" in caplog.text
-        assert "cooldown" in caplog.text
+        assert "cooldown blocked 1 version(s): 0.0.3" in caplog.text
 
 
 def test_gitlab_cooldown_disabled_selects_latest() -> None:
@@ -639,17 +629,11 @@ def test_github_cooldown_skips_with_warning(
         url="https://github.com/example/pkg/archive/v1.0.0.tar.gz",
         upload_time=None,
     )
-    req = Requirement("test-pkg")
-    requirements: typing.Any = defaultdict(list)
-    requirements["test-pkg"].append(req)
-    incompatibilities: typing.Any = defaultdict(list)
 
     with caplog.at_level(logging.WARNING, logger="fromager.resolver"):
-        result = provider.validate_candidate(
-            "test-pkg", requirements, incompatibilities, candidate
-        )
+        result = provider.is_blocked_by_cooldown(candidate)
 
-    assert result is True
+    assert result is False
     assert "cooldown cannot be enforced" in caplog.text
 
 
