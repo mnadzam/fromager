@@ -12,6 +12,7 @@ import shutil
 import tempfile
 import typing
 import zipfile
+from enum import StrEnum
 from urllib.parse import urlparse
 
 import requests.exceptions
@@ -47,9 +48,10 @@ SeenKey = tuple[NormalizedName, tuple[str, ...], str, typing.Literal["sdist", "w
 
 @dataclasses.dataclass
 class SourceBuildResult:
-    """Result of building a package from source.
+    """Result of building or downloading a package.
 
-    Used to return multiple values from _build_from_source().
+    Captures the output artifacts from either a source build or
+    prebuilt wheel download, used across bootstrap phases.
     """
 
     wheel_filename: pathlib.Path | None
@@ -80,6 +82,66 @@ class FailureRecord(typing.TypedDict):
     exception_type: str
     exception_message: str
     failure_type: FailureType
+
+
+class BootstrapPhase(StrEnum):
+    """Processing phases for iterative bootstrap.
+
+    All packages: RESOLVE -> START -> ...
+    Source packages: ... -> PREPARE_SOURCE -> PREPARE_BUILD -> BUILD
+                     -> PROCESS_INSTALL_DEPS -> COMPLETE.
+    Prebuilt packages: ... -> PREPARE_SOURCE -> PROCESS_INSTALL_DEPS -> COMPLETE.
+    """
+
+    RESOLVE = "resolve"
+    START = "start"
+    PREPARE_SOURCE = "prepare-source"
+    PREPARE_BUILD = "prepare-build"
+    BUILD = "build"
+    PROCESS_INSTALL_DEPS = "process-install-deps"
+    COMPLETE = "complete"
+
+    @property
+    def tracks_why(self) -> bool:
+        """Whether this phase pushes onto the dependency-chain (why) stack."""
+        return self not in (BootstrapPhase.RESOLVE, BootstrapPhase.START)
+
+
+@dataclasses.dataclass
+class WorkItem:
+    """A unit of work in the iterative bootstrap loop.
+
+    Carries identity fields set at creation time and accumulated state
+    populated across phases as processing advances.
+
+    Items enter at the RESOLVE phase with only req and req_type set.
+    The RESOLVE phase populates source_url and resolved_version, then
+    creates new items at the START phase for each resolved version.
+    """
+
+    # Identity (set at creation)
+    req: Requirement
+    req_type: RequirementType
+    phase: BootstrapPhase
+    why_snapshot: list[tuple[RequirementType, Requirement, Version]]
+    parent: tuple[Requirement, Version] | None = None
+
+    # Populated by RESOLVE phase (None until then)
+    source_url: str | None = None
+    resolved_version: Version | None = None
+
+    build_sdist_only: bool = False
+
+    # Accumulated state (populated during phases)
+    build_env: build_environment.BuildEnvironment | None = None
+    sdist_root_dir: pathlib.Path | None = None
+    unpack_dir: pathlib.Path | None = None
+    cached_wheel_filename: pathlib.Path | None = None
+    build_result: SourceBuildResult | None = None
+    pbi_pre_built: bool = False
+    build_system_deps: set[Requirement] = dataclasses.field(default_factory=set)
+    build_backend_deps: set[Requirement] = dataclasses.field(default_factory=set)
+    build_sdist_deps: set[Requirement] = dataclasses.field(default_factory=set)
 
 
 class Bootstrapper:
@@ -272,10 +334,10 @@ class Bootstrapper:
         return False
 
     def bootstrap(self, req: Requirement, req_type: RequirementType) -> None:
-        """Bootstrap a package and its dependencies.
+        """Bootstrap a package and its dependencies using an iterative loop.
 
-        Handles setup, validation, and error handling. Delegates actual build
-        work to _bootstrap_impl().
+        Uses an explicit LIFO stack instead of recursion to handle arbitrarily
+        deep dependency graphs without hitting Python's recursion limit.
 
         In test mode, catches build exceptions, records package name, and continues.
         In normal mode, raises exceptions immediately (fail-fast).
@@ -285,29 +347,54 @@ class Bootstrapper:
         """
         logger.info(f"bootstrapping {req} as {req_type} dependency of {self.why[-1:]}")
 
-        # Resolve versions - get all if multiple_versions mode is enabled, else get highest
-        # In test mode, record resolution failures and continue.
-        try:
-            resolved_versions = self.resolve_versions(
+        # Capture parent from current why stack before creating work items
+        parent: tuple[Requirement, Version] | None = None
+        if self.why:
+            _, parent_req, parent_version = self.why[-1]
+            parent = (parent_req, parent_version)
+
+        # Save the why stack so we can restore it after the iterative loop
+        # (the loop modifies self.why for each work item)
+        saved_why = list(self.why)
+
+        # Single RESOLVE item — resolution, version expansion, and error
+        # handling all happen inside the loop via _phase_resolve.
+        stack: list[WorkItem] = [
+            WorkItem(
                 req=req,
                 req_type=req_type,
-                return_all_versions=self.multiple_versions,
+                phase=BootstrapPhase.RESOLVE,
+                why_snapshot=list(self.why),
+                parent=parent,
             )
-            if self.multiple_versions:
-                logger.info(f"resolved {len(resolved_versions)} version(s) for {req}")
-        except Exception as err:
-            if not self.test_mode:
-                raise
-            self._record_test_mode_failure(req, None, err, "resolution")
-            return
+        ]
 
-        # Check if resolution returned no versions
-        if not resolved_versions:
-            raise RuntimeError(f"Could not resolve any versions for {req}")
+        # Main iterative DFS loop
+        while stack:
+            item = stack.pop()
+            self.why = list(item.why_snapshot)
 
-        # Bootstrap each resolved version
-        for source_url, resolved_version in resolved_versions:
-            self._bootstrap_single_version(req, req_type, source_url, resolved_version)
+            with req_ctxvar_context(item.req), self._track_why(item):
+                try:
+                    new_items = self._dispatch_phase(item)
+                except Exception as err:
+                    new_items = self._handle_phase_error(item, err)
+
+            # Progress bar: count new RESOLVE-phase items as new dependencies
+            new_dep_count = sum(
+                1 for it in new_items if it.phase == BootstrapPhase.RESOLVE
+            )
+            if new_dep_count > 0:
+                self.progressbar.update_total(new_dep_count)
+            if not new_items:
+                self.progressbar.update()
+
+            # Phase handlers return [continuation, *new_deps] so extend()
+            # naturally puts new deps on top of the stack (processed first).
+            stack.extend(new_items)
+
+        # Restore why stack for the caller
+        self.why = saved_why
 
         # In multiple versions mode, report any failures for this requirement
         if self.multiple_versions and self._failed_versions:
@@ -323,224 +410,22 @@ class Bootstrapper:
                 for name, ver, exc in failed_for_req:
                     logger.warning(f"  - {name}=={ver}: {type(exc).__name__}: {exc}")
 
-    def _bootstrap_single_version(
-        self,
-        req: Requirement,
-        req_type: RequirementType,
-        source_url: str,
-        resolved_version: Version,
-    ) -> None:
-        """Bootstrap a single version of a package.
-
-        Extracted from bootstrap() to handle both single and multiple version modes.
-        """
-        # Capture parent before _track_why pushes current package onto the stack
-        parent: tuple[Requirement, Version] | None = None
-        if self.why:
-            _, parent_req, parent_version = self.why[-1]
-            parent = (parent_req, parent_version)
-
-        # Update dependency graph unconditionally (before seen check to capture all edges)
-        # Skip for TOP_LEVEL as they were already added in resolve_and_add_top_level()
-        if req_type != RequirementType.TOP_LEVEL:
-            self._add_to_graph(req, req_type, resolved_version, source_url, parent)
-
-        # Build sdist-only (no wheel) if flag is set, unless this is a build
-        # requirement which always needs a full wheel.
-        build_sdist_only = self.sdist_only and not self._processing_build_requirement(
-            req_type
-        )
-
-        # Avoid cyclic dependencies and redundant processing.
-        if self._has_been_seen(req, resolved_version, build_sdist_only):
-            logger.debug(
-                f"redundant {req_type} dependency {req} "
-                f"({resolved_version}, sdist_only={build_sdist_only}) for {self._explain}"
-            )
-            return
-        self._mark_as_seen(req, resolved_version, build_sdist_only)
-
-        logger.info(f"new {req_type} dependency {req} resolves to {resolved_version}")
-
-        # Track dependency chain - context manager ensures cleanup even on exception
-        with self._track_why(req_type, req, resolved_version):
-            try:
-                self._bootstrap_impl(
-                    req, req_type, source_url, resolved_version, build_sdist_only
-                )
-            except Exception as err:
-                # In test_mode, record failure and continue
-                if self.test_mode:
-                    self._record_test_mode_failure(
-                        req, str(resolved_version), err, "bootstrap"
-                    )
-                    return
-
-                # In multiple_versions mode, record failure and continue to next version
-                if self.multiple_versions:
-                    pkg_name = canonicalize_name(req.name)
-                    self._failed_versions.append((pkg_name, str(resolved_version), err))
-                    logger.warning(
-                        f"{req.name}=={resolved_version}: failed to bootstrap: {type(err).__name__}: {err}"
-                    )
-                    # Remove failed node from graph since bootstrap didn't complete
-                    self.ctx.dependency_graph.remove_dependency(
-                        pkg_name, resolved_version
-                    )
-                    self.ctx.write_to_graph_to_file()
-                    return
-
-                # Otherwise, raise the exception (fail-fast)
-                raise
-
-    def _bootstrap_impl(
-        self,
-        req: Requirement,
-        req_type: RequirementType,
-        source_url: str,
-        resolved_version: Version,
-        build_sdist_only: bool,
-    ) -> None:
-        """Internal implementation - performs the actual bootstrap work.
-
-        Called by bootstrap() after setup, validation, and seen-checking.
-
-        Args:
-            req: The requirement to bootstrap.
-            req_type: The type of requirement.
-            source_url: The resolved source URL.
-            resolved_version: The resolved version.
-            build_sdist_only: Whether to build only sdist (no wheel).
-
-        Error Handling:
-            Fatal errors (source build, prebuilt download) raise exceptions
-            for bootstrap() to catch and record.
-
-            Non-fatal errors (post-hook, dependency extraction) are recorded
-            locally and processing continues. These are recorded here because
-            the package build succeeded - only optional post-processing failed.
-        """
-        constraint = self.ctx.constraints.get_constraint(req.name)
-        if constraint:
-            logger.info(
-                f"incoming requirement {req} matches constraint {constraint}. Will apply both."
-            )
-
-        pbi = self.ctx.package_build_info(req)
-
-        cached_wheel_filename: pathlib.Path | None = None
-        unpacked_cached_wheel: pathlib.Path | None = None
-
-        if pbi.pre_built:
-            wheel_filename, unpack_dir = self._download_prebuilt(
-                req=req,
-                req_type=req_type,
-                resolved_version=resolved_version,
-                wheel_url=source_url,
-            )
-            build_result = SourceBuildResult(
-                wheel_filename=wheel_filename,
-                sdist_filename=None,
-                unpack_dir=unpack_dir,
-                sdist_root_dir=None,
-                build_env=None,
-                source_type=SourceType.PREBUILT,
-            )
-        else:
-            # Look for an existing wheel in caches before building
-            cached_wheel_filename, unpacked_cached_wheel = self._find_cached_wheel(
-                req, resolved_version
-            )
-
-            # Build from source (handles test-mode fallback internally)
-            build_result = self._build_from_source(
-                req=req,
-                resolved_version=resolved_version,
-                source_url=source_url,
-                req_type=req_type,
-                build_sdist_only=build_sdist_only,
-                cached_wheel_filename=cached_wheel_filename,
-                unpacked_cached_wheel=unpacked_cached_wheel,
-            )
-
-        # Run post-bootstrap hooks (non-fatal in test mode)
-        try:
-            hooks.run_post_bootstrap_hooks(
-                ctx=self.ctx,
-                req=req,
-                dist_name=canonicalize_name(req.name),
-                dist_version=str(resolved_version),
-                sdist_filename=build_result.sdist_filename,
-                wheel_filename=build_result.wheel_filename,
-            )
-        except Exception as hook_error:
-            if not self.test_mode:
-                raise
-            self._record_test_mode_failure(
-                req, str(resolved_version), hook_error, "hook", "warning"
-            )
-
-        # Extract install dependencies (non-fatal in test mode)
-        try:
-            install_dependencies = self._get_install_dependencies(
-                req=req,
-                resolved_version=resolved_version,
-                wheel_filename=build_result.wheel_filename,
-                sdist_filename=build_result.sdist_filename,
-                sdist_root_dir=build_result.sdist_root_dir,
-                build_env=build_result.build_env,
-                unpack_dir=build_result.unpack_dir,
-            )
-        except Exception as dep_error:
-            if not self.test_mode:
-                raise
-            self._record_test_mode_failure(
-                req,
-                str(resolved_version),
-                dep_error,
-                "dependency_extraction",
-                "warning",
-            )
-            install_dependencies = []
-
-        logger.debug(
-            "install dependencies: %s",
-            ", ".join(sorted(str(r) for r in install_dependencies)),
-        )
-
-        self._add_to_build_order(
-            req=req,
-            version=resolved_version,
-            source_url=source_url,
-            source_type=build_result.source_type,
-            prebuilt=pbi.pre_built,
-            constraint=constraint,
-        )
-
-        self.progressbar.update_total(len(install_dependencies))
-        for dep in self._sort_requirements(install_dependencies):
-            with req_ctxvar_context(dep):
-                # In test mode, bootstrap() catches and records failures internally.
-                # In normal mode, it raises immediately which we propagate.
-                self.bootstrap(req=dep, req_type=RequirementType.INSTALL)
-            self.progressbar.update()
-
-        # Clean up build directories
-        self.ctx.clean_build_dirs(build_result.sdist_root_dir, build_result.build_env)
-
     @contextlib.contextmanager
     def _track_why(
         self,
-        req_type: RequirementType,
-        req: Requirement,
-        resolved_version: Version,
+        item: WorkItem,
     ) -> typing.Generator[None, None, None]:
         """Context manager to track dependency chain in self.why stack.
 
-        Ensures the entry is always popped from the stack, even if an
-        exception occurs during processing. This prevents stack corruption.
+        No-op for phases where tracks_why is False (RESOLVE and START).
+        For all other phases, pushes the item onto the why stack and
+        ensures it is popped even if an exception occurs.
         """
-        self.why.append((req_type, req, resolved_version))
+        if not item.phase.tracks_why:
+            yield
+            return
+        assert item.resolved_version is not None
+        self.why.append((item.req_type, item.req, item.resolved_version))
         try:
             yield
         finally:
@@ -644,6 +529,12 @@ class Bootstrapper:
         sdist_root_dir: pathlib.Path,
         build_env: build_environment.BuildEnvironment,
     ) -> set[Requirement]:
+        """Prepare build dependencies for a package.
+
+        Only used by the git URL resolution path
+        (_resolve_version_from_git_url -> _get_version_from_package_metadata).
+        The main iterative bootstrap loop handles build deps via phase handlers.
+        """
         # build system
         build_system_dependencies = dependencies.get_build_system_dependencies(
             ctx=self.ctx,
@@ -703,13 +594,21 @@ class Bootstrapper:
         build_type: RequirementType,
         build_dependencies: set[Requirement],
     ) -> None:
+        """Bootstrap build dependencies.
+
+        Only used by the git URL resolution path
+        (_resolve_version_from_git_url -> _get_version_from_package_metadata).
+        The main iterative bootstrap loop handles build deps via phase handlers.
+        """
         self.progressbar.update_total(len(build_dependencies))
 
         for dep in self._sort_requirements(build_dependencies):
             with req_ctxvar_context(dep):
-                # In test mode, bootstrap() catches and records failures internally.
-                # In normal mode, it raises immediately which we propagate.
+                # Save/restore self.why because the iterative bootstrap()
+                # modifies it internally for each work item.
+                saved_why = list(self.why)
                 self.bootstrap(req=dep, req_type=build_type)
+                self.why = saved_why
             self.progressbar.update()
 
     def _download_prebuilt(
@@ -886,105 +785,6 @@ class Bootstrapper:
                 f"building wheel {req.name}=={resolved_version} to get install requirements"
             )
             return self._build_wheel(req, resolved_version, sdist_root_dir, build_env)
-
-    def _build_from_source(
-        self,
-        req: Requirement,
-        resolved_version: Version,
-        source_url: str,
-        req_type: RequirementType,
-        build_sdist_only: bool,
-        cached_wheel_filename: pathlib.Path | None,
-        unpacked_cached_wheel: pathlib.Path | None,
-    ) -> SourceBuildResult:
-        """Build package from source.
-
-        Orchestrates download, preparation, build environment setup, and build.
-        In test mode, attempts pre-built fallback on failure.
-
-        Raises:
-            Exception: In normal mode, if build fails.
-                In test mode, only if build fails AND fallback also fails.
-        """
-        try:
-            # Download and prepare source (if no cached wheel)
-            if not unpacked_cached_wheel:
-                logger.debug("no cached wheel, downloading sources")
-                source_filename = self._download_source(
-                    req=req,
-                    resolved_version=resolved_version,
-                    source_url=source_url,
-                )
-                sdist_root_dir = self._prepare_source(
-                    req=req,
-                    resolved_version=resolved_version,
-                    source_filename=source_filename,
-                )
-            else:
-                logger.debug(f"have cached wheel in {unpacked_cached_wheel}")
-                sdist_root_dir = unpacked_cached_wheel / unpacked_cached_wheel.stem
-
-            assert sdist_root_dir is not None
-
-            if sdist_root_dir.parent.parent != self.ctx.work_dir:
-                raise ValueError(
-                    f"'{sdist_root_dir}/../..' should be {self.ctx.work_dir}"
-                )
-            unpack_dir = sdist_root_dir.parent
-
-            build_env = self._create_build_env(
-                req=req,
-                resolved_version=resolved_version,
-                parent_dir=sdist_root_dir.parent,
-            )
-
-            # Prepare build dependencies (always needed)
-            # Note: This may recursively call bootstrap() for build deps,
-            # which has its own error handling.
-            self._prepare_build_dependencies(
-                req=req,
-                resolved_version=resolved_version,
-                sdist_root_dir=sdist_root_dir,
-                build_env=build_env,
-            )
-
-            # Build wheel or sdist
-            wheel_filename, sdist_filename = self._do_build(
-                req=req,
-                resolved_version=resolved_version,
-                sdist_root_dir=sdist_root_dir,
-                build_env=build_env,
-                build_sdist_only=build_sdist_only,
-                cached_wheel_filename=cached_wheel_filename,
-            )
-
-            source_type = sources.get_source_type(self.ctx, req)
-
-            return SourceBuildResult(
-                wheel_filename=wheel_filename,
-                sdist_filename=sdist_filename,
-                unpack_dir=unpack_dir,
-                sdist_root_dir=sdist_root_dir,
-                build_env=build_env,
-                source_type=source_type,
-            )
-
-        except Exception as build_error:
-            if not self.test_mode:
-                raise
-
-            # Test mode: attempt pre-built fallback
-            fallback_result = self._handle_test_mode_failure(
-                req=req,
-                resolved_version=resolved_version,
-                req_type=req_type,
-                build_error=build_error,
-            )
-            if fallback_result is None:
-                # Fallback failed, re-raise for bootstrap() to catch
-                raise
-
-            return fallback_result
 
     def _handle_test_mode_failure(
         self,
@@ -1472,6 +1272,470 @@ class Bootstrapper:
             # Requirement and Version instances that can't be
             # converted to JSON without help.
             json.dump(self._build_stack, f, indent=2, default=str)
+
+    # ---- Iterative bootstrap: phase handlers and helpers ----
+
+    def _create_unresolved_work_items(
+        self,
+        deps: typing.Iterable[Requirement],
+        dep_req_type: RequirementType,
+        parent_req: Requirement,
+        parent_version: Version,
+    ) -> list[WorkItem]:
+        """Create RESOLVE-phase work items for dependencies.
+
+        Called inside a parent's _track_why context so that why_snapshot
+        captures the parent's dependency chain. Resolution and error
+        handling happen later when each item's RESOLVE phase runs.
+        """
+        return [
+            WorkItem(
+                req=dep,
+                req_type=dep_req_type,
+                phase=BootstrapPhase.RESOLVE,
+                why_snapshot=list(self.why),
+                parent=(parent_req, parent_version),
+            )
+            for dep in self._sort_requirements(deps)
+        ]
+
+    def _phase_resolve(self, item: WorkItem) -> list[WorkItem]:
+        """RESOLVE phase: resolve versions and expand into START-phase items.
+
+        Centralizes version resolution so all dependencies are expanded
+        uniformly. Future filtering (e.g. versions already on disk) and
+        parallelization can be added here in one place.
+
+        Returns:
+            One START-phase item per resolved version.
+        """
+        resolved_versions = self.resolve_versions(
+            item.req,
+            item.req_type,
+            return_all_versions=self.multiple_versions,
+        )
+        if not resolved_versions:
+            raise RuntimeError(f"Could not resolve any versions for {item.req}")
+
+        if self.multiple_versions:
+            logger.info(f"resolved {len(resolved_versions)} version(s) for {item.req}")
+
+        # Build list so highest version ends up on top of the stack
+        # (last element after extend) and is processed first.
+        items: list[WorkItem] = []
+        for source_url, version in reversed(resolved_versions):
+            items.append(
+                WorkItem(
+                    req=item.req,
+                    req_type=item.req_type,
+                    phase=BootstrapPhase.START,
+                    why_snapshot=list(item.why_snapshot),
+                    parent=item.parent,
+                    source_url=source_url,
+                    resolved_version=version,
+                )
+            )
+        return items
+
+    def _phase_start(self, item: WorkItem) -> list[WorkItem]:
+        """START phase: add to graph, check if already seen.
+
+        _track_why is a no-op for this phase (tracks_why is False),
+        matching the original behavior where graph addition and
+        seen-check happen before pushing onto the why stack.
+
+        Returns:
+            Empty list if already seen (nothing to do).
+            [item] advanced to PREPARE_SOURCE if this is new work.
+        """
+        assert item.resolved_version is not None
+        assert item.source_url is not None
+
+        # Add to graph (skip TOP_LEVEL, already added in resolve_and_add_top_level)
+        if item.req_type != RequirementType.TOP_LEVEL:
+            self._add_to_graph(
+                item.req,
+                item.req_type,
+                item.resolved_version,
+                item.source_url,
+                item.parent,
+            )
+
+        item.build_sdist_only = (
+            self.sdist_only and not self._processing_build_requirement(item.req_type)
+        )
+
+        if self._has_been_seen(item.req, item.resolved_version, item.build_sdist_only):
+            logger.debug(
+                f"redundant {item.req_type} dependency {item.req} "
+                f"({item.resolved_version}, sdist_only={item.build_sdist_only}) "
+                f"for {self._explain}"
+            )
+            return []
+        self._mark_as_seen(item.req, item.resolved_version, item.build_sdist_only)
+
+        logger.info(
+            f"new {item.req_type} dependency {item.req} "
+            f"resolves to {item.resolved_version}"
+        )
+
+        item.pbi_pre_built = self.ctx.package_build_info(item.req).pre_built
+        item.phase = BootstrapPhase.PREPARE_SOURCE
+        return [item]
+
+    def _phase_prepare_source(self, item: WorkItem) -> list[WorkItem]:
+        """PREPARE_SOURCE phase: download source or prebuilt, get build system deps.
+
+        Returns:
+            Prebuilt: [item] advanced to PROCESS_INSTALL_DEPS (skip build phases).
+            Source: [item advanced to PREPARE_BUILD, *build_system_dep_items].
+        """
+        assert item.resolved_version is not None
+        assert item.source_url is not None
+
+        constraint = self.ctx.constraints.get_constraint(item.req.name)
+        if constraint:
+            logger.info(
+                f"incoming requirement {item.req} matches constraint "
+                f"{constraint}. Will apply both."
+            )
+
+        if item.pbi_pre_built:
+            wheel_filename, unpack_dir = self._download_prebuilt(
+                req=item.req,
+                req_type=item.req_type,
+                resolved_version=item.resolved_version,
+                wheel_url=item.source_url,
+            )
+            item.build_result = SourceBuildResult(
+                wheel_filename=wheel_filename,
+                sdist_filename=None,
+                unpack_dir=unpack_dir,
+                sdist_root_dir=None,
+                build_env=None,
+                source_type=SourceType.PREBUILT,
+            )
+            item.phase = BootstrapPhase.PROCESS_INSTALL_DEPS
+            return [item]
+
+        # Source build path
+        cached_wheel, unpacked = self._find_cached_wheel(
+            item.req, item.resolved_version
+        )
+        item.cached_wheel_filename = cached_wheel
+
+        if not unpacked:
+            logger.debug("no cached wheel, downloading sources")
+            source_filename = self._download_source(
+                req=item.req,
+                resolved_version=item.resolved_version,
+                source_url=item.source_url,
+            )
+            sdist_root_dir = self._prepare_source(
+                req=item.req,
+                resolved_version=item.resolved_version,
+                source_filename=source_filename,
+            )
+        else:
+            logger.debug(f"have cached wheel in {unpacked}")
+            sdist_root_dir = unpacked / unpacked.stem
+
+        assert sdist_root_dir is not None
+
+        if sdist_root_dir.parent.parent != self.ctx.work_dir:
+            raise ValueError(f"'{sdist_root_dir}/../..' should be {self.ctx.work_dir}")
+        item.sdist_root_dir = sdist_root_dir
+        item.unpack_dir = sdist_root_dir.parent
+
+        item.build_env = self._create_build_env(
+            req=item.req,
+            resolved_version=item.resolved_version,
+            parent_dir=sdist_root_dir.parent,
+        )
+
+        # Get build system dependencies
+        item.build_system_deps = dependencies.get_build_system_dependencies(
+            ctx=self.ctx,
+            req=item.req,
+            version=item.resolved_version,
+            sdist_root_dir=sdist_root_dir,
+        )
+
+        dep_items = self._create_unresolved_work_items(
+            item.build_system_deps,
+            RequirementType.BUILD_SYSTEM,
+            item.req,
+            item.resolved_version,
+        )
+
+        item.phase = BootstrapPhase.PREPARE_BUILD
+        return [item] + dep_items
+
+    def _phase_prepare_build(self, item: WorkItem) -> list[WorkItem]:
+        """PREPARE_BUILD phase: install system deps, get backend/sdist deps.
+
+        Returns:
+            [item advanced to BUILD, *backend_dep_items, *sdist_dep_items].
+        """
+        assert item.resolved_version is not None
+        assert item.build_env is not None
+        assert item.sdist_root_dir is not None
+
+        # Install build system deps (their wheels exist from DFS processing)
+        item.build_env.install(item.build_system_deps)
+
+        # Get build backend dependencies
+        item.build_backend_deps = dependencies.get_build_backend_dependencies(
+            ctx=self.ctx,
+            req=item.req,
+            version=item.resolved_version,
+            sdist_root_dir=item.sdist_root_dir,
+            build_env=item.build_env,
+        )
+
+        # Get build sdist dependencies
+        item.build_sdist_deps = dependencies.get_build_sdist_dependencies(
+            ctx=self.ctx,
+            req=item.req,
+            version=item.resolved_version,
+            sdist_root_dir=item.sdist_root_dir,
+            build_env=item.build_env,
+        )
+
+        backend_items = self._create_unresolved_work_items(
+            item.build_backend_deps,
+            RequirementType.BUILD_BACKEND,
+            item.req,
+            item.resolved_version,
+        )
+        sdist_items = self._create_unresolved_work_items(
+            item.build_sdist_deps,
+            RequirementType.BUILD_SDIST,
+            item.req,
+            item.resolved_version,
+        )
+        dep_items = backend_items + sdist_items
+
+        item.phase = BootstrapPhase.BUILD
+        return [item] + dep_items
+
+    def _phase_build(self, item: WorkItem) -> list[WorkItem]:
+        """BUILD phase: install remaining deps, build wheel/sdist.
+
+        Returns:
+            [item] advanced to PROCESS_INSTALL_DEPS.
+        """
+        assert item.resolved_version is not None
+        assert item.build_env is not None
+        assert item.sdist_root_dir is not None
+
+        # Install backend+sdist deps if disjoint from system deps
+        remaining_deps = item.build_backend_deps | item.build_sdist_deps
+        if remaining_deps.isdisjoint(item.build_system_deps):
+            item.build_env.install(remaining_deps)
+
+        wheel_filename, sdist_filename = self._do_build(
+            req=item.req,
+            resolved_version=item.resolved_version,
+            sdist_root_dir=item.sdist_root_dir,
+            build_env=item.build_env,
+            build_sdist_only=item.build_sdist_only,
+            cached_wheel_filename=item.cached_wheel_filename,
+        )
+
+        source_type = sources.get_source_type(self.ctx, item.req)
+
+        item.build_result = SourceBuildResult(
+            wheel_filename=wheel_filename,
+            sdist_filename=sdist_filename,
+            unpack_dir=item.sdist_root_dir.parent,
+            sdist_root_dir=item.sdist_root_dir,
+            build_env=item.build_env,
+            source_type=source_type,
+        )
+
+        item.phase = BootstrapPhase.PROCESS_INSTALL_DEPS
+        return [item]
+
+    def _phase_process_install_deps(self, item: WorkItem) -> list[WorkItem]:
+        """PROCESS_INSTALL_DEPS phase: hooks, extract deps, build order.
+
+        Returns:
+            [item advanced to COMPLETE, *install_dep_items].
+        """
+        assert item.resolved_version is not None
+        assert item.source_url is not None
+        assert item.build_result is not None
+
+        # Run post-bootstrap hooks (non-fatal in test mode)
+        try:
+            hooks.run_post_bootstrap_hooks(
+                ctx=self.ctx,
+                req=item.req,
+                dist_name=canonicalize_name(item.req.name),
+                dist_version=str(item.resolved_version),
+                sdist_filename=item.build_result.sdist_filename,
+                wheel_filename=item.build_result.wheel_filename,
+            )
+        except Exception as hook_error:
+            if not self.test_mode:
+                raise
+            self._record_test_mode_failure(
+                item.req,
+                str(item.resolved_version),
+                hook_error,
+                "hook",
+                "warning",
+            )
+
+        # Extract install dependencies (non-fatal in test mode)
+        try:
+            install_dependencies = self._get_install_dependencies(
+                req=item.req,
+                resolved_version=item.resolved_version,
+                wheel_filename=item.build_result.wheel_filename,
+                sdist_filename=item.build_result.sdist_filename,
+                sdist_root_dir=item.build_result.sdist_root_dir,
+                build_env=item.build_result.build_env,
+                unpack_dir=item.build_result.unpack_dir,
+            )
+        except Exception as dep_error:
+            if not self.test_mode:
+                raise
+            self._record_test_mode_failure(
+                item.req,
+                str(item.resolved_version),
+                dep_error,
+                "dependency_extraction",
+                "warning",
+            )
+            install_dependencies = []
+
+        logger.debug(
+            "install dependencies: %s",
+            ", ".join(sorted(str(r) for r in install_dependencies)),
+        )
+
+        pbi = self.ctx.package_build_info(item.req)
+        constraint = self.ctx.constraints.get_constraint(item.req.name)
+        self._add_to_build_order(
+            req=item.req,
+            version=item.resolved_version,
+            source_url=item.source_url,
+            source_type=item.build_result.source_type,
+            prebuilt=pbi.pre_built,
+            constraint=constraint,
+        )
+
+        dep_items = self._create_unresolved_work_items(
+            install_dependencies,
+            RequirementType.INSTALL,
+            item.req,
+            item.resolved_version,
+        )
+
+        item.phase = BootstrapPhase.COMPLETE
+        return [item] + dep_items
+
+    def _phase_complete(self, item: WorkItem) -> list[WorkItem]:
+        """COMPLETE phase: clean up build directories.
+
+        Returns:
+            Empty list (processing finished for this item).
+        """
+        if item.build_result is not None:
+            self.ctx.clean_build_dirs(
+                item.build_result.sdist_root_dir,
+                item.build_result.build_env,
+            )
+        return []
+
+    def _dispatch_phase(self, item: WorkItem) -> list[WorkItem]:
+        """Route a work item to the appropriate phase handler."""
+        match item.phase:
+            case BootstrapPhase.RESOLVE:
+                return self._phase_resolve(item)
+            case BootstrapPhase.START:
+                return self._phase_start(item)
+            case BootstrapPhase.PREPARE_SOURCE:
+                return self._phase_prepare_source(item)
+            case BootstrapPhase.PREPARE_BUILD:
+                return self._phase_prepare_build(item)
+            case BootstrapPhase.BUILD:
+                return self._phase_build(item)
+            case BootstrapPhase.PROCESS_INSTALL_DEPS:
+                return self._phase_process_install_deps(item)
+            case BootstrapPhase.COMPLETE:
+                return self._phase_complete(item)
+            case _:
+                raise ValueError(f"unexpected phase: {item.phase}")
+
+    def _handle_phase_error(
+        self,
+        item: WorkItem,
+        err: Exception,
+    ) -> list[WorkItem]:
+        """Handle errors from phase processing.
+
+        Returns work items to continue processing (e.g. prebuilt fallback),
+        or empty list to skip this item. Raises in normal mode (fail-fast).
+        """
+        # Resolution failures: only recoverable in test mode
+        if item.phase == BootstrapPhase.RESOLVE:
+            if self.test_mode:
+                self._record_test_mode_failure(item.req, None, err, "resolution")
+                return []
+            raise
+
+        # Test mode: try prebuilt fallback for build-related phases
+        if self.test_mode:
+            if (
+                item.phase
+                in (
+                    BootstrapPhase.PREPARE_SOURCE,
+                    BootstrapPhase.PREPARE_BUILD,
+                    BootstrapPhase.BUILD,
+                )
+                and not item.pbi_pre_built
+            ):
+                assert item.resolved_version is not None
+                fallback = self._handle_test_mode_failure(
+                    req=item.req,
+                    resolved_version=item.resolved_version,
+                    req_type=item.req_type,
+                    build_error=err,
+                )
+                if fallback is not None:
+                    item.build_result = fallback
+                    item.phase = BootstrapPhase.PROCESS_INSTALL_DEPS
+                    return [item]
+            self._record_test_mode_failure(
+                item.req, str(item.resolved_version), err, "bootstrap"
+            )
+            return []
+
+        # Multiple versions mode: record failure, remove from graph, continue
+        if self.multiple_versions:
+            assert item.resolved_version is not None
+            pkg_name = canonicalize_name(item.req.name)
+            self._failed_versions.append((pkg_name, str(item.resolved_version), err))
+            logger.warning(
+                f"{item.req.name}=={item.resolved_version}: "
+                f"failed to bootstrap during {item.phase} phase: "
+                f"{type(err).__name__}: {err}"
+            )
+            self.ctx.dependency_graph.remove_dependency(pkg_name, item.resolved_version)
+            self._seen_requirements.discard(
+                self._resolved_key(item.req, item.resolved_version, "sdist")
+            )
+            self._seen_requirements.discard(
+                self._resolved_key(item.req, item.resolved_version, "wheel")
+            )
+            self.ctx.write_to_graph_to_file()
+            return []
+
+        # Normal mode: fail-fast
+        raise
 
     def finalize(self) -> int:
         """Finalize bootstrap and return exit code.

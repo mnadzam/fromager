@@ -15,6 +15,7 @@ test_section "basic bootstrap tests"
 run_test "bootstrap"
 run_test "bootstrap_extras"
 run_test "bootstrap_build_tags"
+run_test "bootstrap_iterative"
 
 test_section "bootstrap constraint tests"
 run_test "bootstrap_constraints"
