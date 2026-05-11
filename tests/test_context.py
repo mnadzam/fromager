@@ -10,13 +10,13 @@ from fromager import context
 
 def _make_context(
     tmp_path: pathlib.Path,
-    constraints_file: str | None = None,
+    constraints_files: tuple[str, ...] = (),
     wheel_server_url: str = "",
     cleanup: bool = True,
 ) -> context.WorkContext:
     return context.WorkContext(
         active_settings=None,
-        constraints_file=constraints_file,
+        constraints_files=constraints_files,
         patches_dir=tmp_path / "overrides/patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -43,14 +43,55 @@ def _all_setup_dirs(ctx: context.WorkContext) -> list[pathlib.Path]:
 
 def test_pip_constraints_args(tmp_path: pathlib.Path) -> None:
     constraints_file = tmp_path / "constraints.txt"
-    constraints_file.write_text("\n")  # the file has to exist
-    ctx = _make_context(tmp_path, constraints_file=str(constraints_file))
+    constraints_file.write_text("test==1.0\n")
+    ctx = _make_context(tmp_path, constraints_files=(str(constraints_file),))
     ctx.setup()
-    assert ["--constraint", os.fspath(constraints_file)] == ctx.pip_constraint_args
+    assert ctx.merged_constraints == tmp_path / "work-dir" / "merged-constraints.txt"
+    assert ctx.pip_constraint_args == [
+        "--constraint",
+        os.fspath(ctx.merged_constraints),
+    ]
+
+    assert ctx.merged_constraints.read_text() == "\n".join(
+        (
+            "# auto-generated constraints file",
+            f"# {constraints_file}",
+            "",
+            "test==1.0",
+            "",
+        )
+    )
 
     ctx = _make_context(tmp_path)
     ctx.setup()
     assert [] == ctx.pip_constraint_args
+
+
+def test_multiple_constraints_files(tmp_path: pathlib.Path) -> None:
+    constraints1 = tmp_path / "constraints1.txt"
+    constraints1.write_text("test==1.0\n")
+    constraints2 = tmp_path / "constraints2.txt"
+    constraints2.write_text("foo>=2.0\n")
+    constraints3 = tmp_path / "constraints3.txt"
+    constraints3.write_text("foo!=2.1.1\n")
+    ctx = _make_context(
+        tmp_path,
+        constraints_files=(str(constraints1), str(constraints2), str(constraints3)),
+    )
+    ctx.setup()
+
+    assert ctx.merged_constraints.read_text() == "\n".join(
+        (
+            "# auto-generated constraints file",
+            f"# {constraints1}",
+            f"# {constraints2}",
+            f"# {constraints3}",
+            "",
+            "foo!=2.1.1,>=2.0",
+            "test==1.0",
+            "",
+        )
+    )
 
 
 def test_setup_creates_directories(tmp_path: pathlib.Path) -> None:

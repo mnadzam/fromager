@@ -84,6 +84,7 @@ tos
 traceback
 tracebacks
 txt
+unsatisfiable
 unshare
 url
 urls

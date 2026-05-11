@@ -47,7 +47,6 @@ def tmp_context(tmp_path: pathlib.Path) -> context.WorkContext:
     variant = "cpu"
     ctx = context.WorkContext(
         active_settings=None,
-        constraints_file=None,
         patches_dir=patches_dir,
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -73,7 +72,6 @@ def testdata_context(
             variant=variant,
             max_jobs=None,
         ),
-        constraints_file=None,
         patches_dir=overrides / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",
@@ -107,7 +105,6 @@ def make_sbom_ctx(
         settings._package_settings[ps.name] = ps
     return context.WorkContext(
         active_settings=settings,
-        constraints_file=None,
         patches_dir=tmp_path / "patches",
         sdists_repo=tmp_path / "sdists-repo",
         wheels_repo=tmp_path / "wheels-repo",

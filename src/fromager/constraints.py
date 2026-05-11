@@ -1,5 +1,6 @@
 import logging
 import pathlib
+import typing
 from collections.abc import Generator
 
 from packaging.requirements import Requirement
@@ -23,6 +24,9 @@ class Constraints:
 
     def __iter__(self) -> Generator[NormalizedName, None, None]:
         yield from self._data
+
+    def __bool__(self) -> bool:
+        return bool(self._data)
 
     def __len__(self) -> int:
         return len(self._data)
@@ -70,11 +74,19 @@ class Constraints:
         self._data[canon_name] = req
 
     def load_constraints_file(self, constraints_file: str | pathlib.Path) -> None:
-        """Load constraints from a constraints file"""
+        """Load constraints from a constraints file or URL"""
         logger.info("loading constraints from %s", constraints_file)
         content = requirements_file.parse_requirements_file(constraints_file)
         for line in content:
             self.add_constraint(line)
+
+    def dump_constraints(self, output: typing.TextIO) -> None:
+        """Dump combined constraints to a text stream"""
+        # sort by normalized name
+        for _, req in sorted(self._data.items()):
+            # write requirement without markers. They have been evaluated
+            # in add_constraint()
+            output.write(f"{req.name}{req.specifier}\n")
 
     def get_constraint(self, name: str) -> Requirement | None:
         return self._data.get(canonicalize_name(name))

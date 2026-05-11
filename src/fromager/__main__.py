@@ -133,8 +133,13 @@ else:
 @click.option(
     "-c",
     "--constraints-file",
+    "constraints_files",
+    multiple=True,
     type=str,
-    help="location of the constraints file",
+    help=(
+        "location of the constraints files. Constraints are merged and "
+        "checked for conflicts. Supports local path and remote from https://"
+    ),
 )
 @click.option(
     "--cleanup/--no-cleanup",
@@ -177,7 +182,7 @@ def main(
     patches_dir: pathlib.Path,
     settings_file: pathlib.Path,
     settings_dir: pathlib.Path,
-    constraints_file: str,
+    constraints_files: tuple[str, ...],
     cleanup: bool,
     variant: str,
     jobs: int | None,
@@ -247,7 +252,7 @@ def main(
             logger.info(f"variant: {variant}")
             logger.info(f"patches dir: {patches_dir}")
             logger.info(f"maximum concurrent jobs: {jobs}")
-            logger.info(f"constraints file: {constraints_file}")
+            logger.info(f"constraints files: {', '.join(constraints_files)}")
             logger.info(f"network isolation: {network_isolation}")
             if build_wheel_server_url:
                 logger.info(f"external build wheel server: {build_wheel_server_url}")
@@ -267,7 +272,7 @@ def main(
             variant=variant,
             max_jobs=jobs,
         ),
-        constraints_file=constraints_file,
+        constraints_files=constraints_files,
         patches_dir=patches_dir,
         sdists_repo=sdists_repo,
         wheels_repo=wheels_repo,
