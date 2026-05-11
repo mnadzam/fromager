@@ -44,7 +44,7 @@ def test_pyproject_no_toml(
     fixer.run()
     with tmp_path.joinpath("pyproject.toml").open(encoding="utf-8") as f:
         doc = tomlkit.load(f)
-    assert isinstance(doc["build-system"], typing.Container)
+    assert isinstance(doc["build-system"], typing.Mapping)
     assert dict(doc["build-system"].items()) == {
         "requires": ["setuptools>=68.0.0"],
     }
@@ -70,7 +70,7 @@ def test_pyproject_with_toml(
     fixer.run()
     with tmp_path.joinpath("pyproject.toml").open(encoding="utf-8") as f:
         doc = tomlkit.load(f)
-    assert isinstance(doc["build-system"], typing.Container)
+    assert isinstance(doc["build-system"], typing.Mapping)
     assert dict(doc["build-system"].items()) == {
         "build-backend": "maturin",
         "requires": [
@@ -94,7 +94,7 @@ def test_pyproject_fix(
     pyproject.apply_project_override(testdata_context, req, tmp_path)
 
     doc = tomlkit.loads(pyproject_toml.read_text())
-    assert isinstance(doc["build-system"], typing.Container)
+    assert isinstance(doc["build-system"], typing.Mapping)
     assert dict(doc["build-system"].items()) == {
         "requires": [
             "setuptools>=68.0.0",
@@ -130,7 +130,7 @@ def test_pyproject_preserve_multiple_requires(tmp_path: pathlib.Path) -> None:
     fixer.run()
     with tmp_path.joinpath("pyproject.toml").open(encoding="utf-8") as f:
         doc = tomlkit.load(f)
-    assert isinstance(doc["build-system"], typing.Container)
+    assert isinstance(doc["build-system"], typing.Mapping)
     # PyprojectFix parses requirements using packaging.requirements.Requirement and then casts
     # to str, this may change white spaces in markers, let's do it here as well
     assert dict(doc["build-system"].items())["requires"] == [
@@ -163,7 +163,7 @@ def test_pyproject_override_multiple_requires(tmp_path: pathlib.Path) -> None:
     fixer.run()
     with tmp_path.joinpath("pyproject.toml").open(encoding="utf-8") as f:
         doc = tomlkit.load(f)
-    assert isinstance(doc["build-system"], typing.Container)
+    assert isinstance(doc["build-system"], typing.Mapping)
     # PyprojectFix parses requirements using packaging.requirements.Requirement and then casts
     # to str, this may change white spaces in markers, let's do it here as well
     assert dict(doc["build-system"].items())["requires"] == [
