@@ -130,3 +130,17 @@ Valid values:
 This is useful when a specific package is trusted enough to allow recent
 versions, or when a package's release cadence makes the global cooldown
 impractical.
+
+Top-Level ``==`` Pin Exemption
+------------------------------
+
+Top-level requirements that are a single exact ``==`` pin
+(e.g. ``torch==2.5.1``) bypass the cooldown automatically -- the operator
+has explicitly chosen that version.
+
+Wildcard or compound specifiers (for example ``==1.*`` or ``==1.0,>0.9``)
+are **not** exempt.
+
+``==`` specifiers in transitive dependencies are also **not** exempt;
+without this distinction a malicious package could pin its own dependencies
+to bypass cooldown.
