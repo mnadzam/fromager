@@ -173,3 +173,32 @@ def test_combine_constraints() -> None:
     assert c.get_constraint("foo") == Requirement("foo<2.0,>=1.0")
     c.add_constraint("foo!=1.1.0")
     assert c.get_constraint("foo") == Requirement("foo<2.0,>=1.0,!=1.1.0")
+
+
+@pytest.mark.parametrize("specifier", ["<0", "<0.0", "<0.0.0"])
+def test_blocked_package(specifier: str) -> None:
+    c = Constraints()
+    c.add_constraint(f"blocked-pkg{specifier}")
+    assert c.is_blocked("blocked-pkg")
+    assert not c.is_satisfied_by("blocked-pkg", Version("0"))
+    assert not c.is_satisfied_by("blocked-pkg", Version("0.0.1"))
+    assert not c.is_satisfied_by("blocked-pkg", Version("1.0"))
+
+
+def test_blocked_then_non_blocked_raises() -> None:
+    c = Constraints()
+    c.add_constraint("foo<0")
+    with pytest.raises(InvalidConstraintError, match=r"blocked and non-blocked"):
+        c.add_constraint("foo>=1.0")
+
+
+def test_non_blocked_then_blocked_raises() -> None:
+    c = Constraints()
+    c.add_constraint("foo>=1.0")
+    with pytest.raises(InvalidConstraintError, match=r"blocked and non-blocked"):
+        c.add_constraint("foo<0")
+
+
+def test_is_blocked_unknown_package() -> None:
+    c = Constraints()
+    assert not c.is_blocked("unknown")
