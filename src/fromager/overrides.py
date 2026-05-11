@@ -17,6 +17,23 @@ logger = logging.getLogger(__name__)
 
 _mgr: extension.ExtensionManager | None = None
 
+# Hooks that per-package plugins can implement to override default build behavior.
+OVERRIDE_HOOK_NAMES: tuple[str, ...] = (
+    "add_extra_metadata_to_wheels",
+    "build_sdist",
+    "build_wheel",
+    "download_source",
+    "expected_source_archive_name",
+    "expected_source_directory_name",
+    "get_build_backend_dependencies",
+    "get_build_sdist_dependencies",
+    "get_build_system_dependencies",
+    "get_install_dependencies_of_sdist",
+    "get_resolver_provider",
+    "prepare_source",
+    "update_extra_environ",
+)
+
 
 def _get_extensions() -> extension.ExtensionManager:
     global _mgr

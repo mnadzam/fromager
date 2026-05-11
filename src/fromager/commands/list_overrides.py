@@ -9,6 +9,8 @@ from packaging.version import Version
 from rich.table import Table
 
 from fromager import clickext, context
+from fromager.hooks import GLOBAL_HOOK_NAMES
+from fromager.overrides import OVERRIDE_HOOK_NAMES
 from fromager.packagesettings import PatchMap
 
 
@@ -63,6 +65,7 @@ def list_overrides(
     variants = sorted(wkctx.settings.all_variants())
     variant_names = [str(v) for v in variants]
     export_data = []
+    all_hook_names = GLOBAL_HOOK_NAMES + OVERRIDE_HOOK_NAMES
 
     for name in overridden_packages:
         pbi = wkctx.settings.package_build_info(name)
@@ -70,24 +73,7 @@ def list_overrides(
 
         plugin_hooks: list[str] = []
         if pbi.plugin:
-            for hook in [
-                # from hooks.py
-                "post_build",
-                "post_bootstrap",
-                "prebuilt_wheel",
-                # from overrides.py, found by searching for find_override_method
-                "download_source",
-                "get_resolver_provider",
-                "prepare_source",
-                "build_sdist",
-                "build_wheel",
-                "get_build_requirements",
-                "get_build_sdist_requirements",
-                "get_build_wheel_requirements",
-                "expected_source_archive_name",
-                "expected_source_directory_name",
-                "add_extra_metadata_to_wheels",
-            ]:
+            for hook in all_hook_names:
                 if hasattr(pbi.plugin, hook):
                     plugin_hooks.append(hook)
         plugin_hooks_str = ", ".join(plugin_hooks)
